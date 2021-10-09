@@ -1,0 +1,448 @@
+---
+title: "Spline Regression on Ozone Data"
+author: "Hannah Pieper"
+date: "3/30/21"
+output:
+  pdf_document: default
+  html_notebook: default
+  html_document:
+    df_print: paged
+header-includes:
+   - \usepackage{upgreek}
+   - \usepackage{amsmath}
+   - \usepackage{enumitem}
+---
+
+# Introduction
+
+This document performs regression using B-splines, natural splines and smoothing splines on the ozone data found at https://web.stanford.edu/~hastie/ElemStatLearn/data.html. This data consists of observations containing four features; ozone, radiation, temperature and wind. In particular, we perform regression with $B$-splines, natural splines, and smoothing splines. 
+
+This document uses the following packages: splines, dplyr, MASS, knitr, graphics. 
+
+```{r load-packages, include=FALSE}
+library(dplyr)
+library(MASS)
+library(knitr)
+library(graphics)
+library(splines)
+library(gam)
+library(mgcv)
+library(broom)
+library(ggplot2)
+```
+
+First we load the data. 
+
+```{r}
+ozone.data<-read.table("ozone_data.txt", header = TRUE, dec=".")
+```
+
+This data frame contains each of the observations in a row. We will consider the ozone levels to be the response variable and temperature, wind, and radiation to be predictors. Visually: 
+```{r}
+head(ozone.data)
+```
+We will perform regression with regular splines, natural splines and smoothing splines with the same degree of freedom. This can be set here: 
+```{r}
+degf<-6
+```
+
+
+## Functions and Documentation
+Any functions that are written specifically for this document are included here. These functions build the models and plot them and the bulk of the functions deals with formatting these plots. 
+
+### b.or.n.partial()
+
+Description: This function performs linear regression on one feature with either regression splines or natural splines, plots the training data and the predicted values, and returns the linear model.
+
+Inputs:     
+column - the feature on which we perform regression. Must be entered as a string and should be one of "temperature", "radiation", or "wind".    
+degf - the degrees of freedom.     
+type - enter "bs" for regression with regular splines and "ns" for regression with natural splines.  
+
+Output: the linear model.
+
+```{r}
+b.or.n.partial<-function(column, degf, type){
+  
+  # First we extract the feature data.
+  feature<-ozone.data[[column]]
+  # Construct a grid of values on which we use the model to predict ozone levels
+  collims<-range(feature)
+  col_grid<-seq(min(collims), max(collims))
+  
+  # This block performs regression with regression splines
+  if(type == "bs"){
+    if(column=="radiation"){
+        # This builds the linear model
+        model = lm(ozone~bs(radiation, df=degf), data = ozone.data)
+        # Use the linear model to predict ozone levels on the grid
+        pred<- predict(model, newdata = list(radiation = col_grid), se = TRUE)
+    }
+    else if(column == "temperature"){
+          model = lm(ozone~bs(temperature, df=degf), data = ozone.data)
+          pred<- predict(model, newdata = list(temperature = col_grid), se = TRUE)
+    }
+    else if(column == "wind"){
+          model = lm(ozone~bs(wind, df=degf), data = ozone.data)
+          pred<- predict(model, newdata = list(wind = col_grid), se = TRUE)
+    }
+    else{
+      print("Incorrect Feature Input")
+    }
+  }
+  
+  # This block performs regression with natural splines.
+  else if(type == "ns"){
+    if(column=="radiation"){
+        model = lm(ozone~ns(radiation, df=degf), data = ozone.data)
+        pred<- predict(model, newdata = list(radiation = col_grid), se = TRUE)
+    }
+    else if(column == "temperature"){
+          model = lm(ozone~ns(temperature, df=degf), data = ozone.data)
+          pred<- predict(model, newdata = list(temperature = col_grid), se = TRUE)
+    }
+    else if(column == "wind"){
+          model = lm(ozone~ns(wind, df=degf), data = ozone.data)
+          pred<- predict(model, newdata = list(wind = col_grid), se = TRUE)
+    }
+    else{
+      print("Incorrect Feature Input")
+    }
+  }
+  else{
+      print("Incorrect Spline Input")
+  }
+  
+  # We construct the error bands as 2*(standard error) from our predictions
+  # using our model
+  error_bands<-with(pred, cbind("upper"=fit+2*se.fit, "lower" = fit - 2*se.fit))
+  
+  # Create the labels and titles for our plot
+  label1<-"SE bands computed from predictions"
+  label2<-"Predictions by model"
+  Key<-" Training Data"
+  
+  if(type=="ns"){
+    name<-"Natural Splines on Ozone Data"
+  }
+  else{
+    name<-"Regression Splines on Ozone Data"
+  }
+  
+  # Construct the plot 
+  p<-ggplot() +
+    geom_point(data = ozone.data, aes(x = feature, y = ozone, color=Key)) +
+    geom_line(aes(x = col_grid, y = pred$fit, color=label2)) + 
+    geom_ribbon(aes(x = col_grid, 
+      ymin = error_bands[,"lower"], 
+      ymax = error_bands[,"upper"],
+      color=label1), 
+      alpha = 0.3) + 
+    xlim(collims) + 
+    theme(legend.position = 'right') + 
+    guides(fill=guide_legend(title="New Legend Title"))+
+    labs(title="name", x=column, y="ozone")
+  
+  # display the plot
+  print(p)
+  # Return the model
+  return(model)
+  }
+```
+
+
+### ss.partial()
+
+Description: This function performs regression on one feature with smoothing splines, plots the training data and the predicted values, and returns the model. This function builds two models using different smoothing parameters $\lambda$. In the first, $\lambda$ is determined from the specified degrees of freedom and in the second $\lambda$ is determined via cross validation.   
+
+Inputs:     
+column - the feature on which we perform regression. Must be entered as a string and should be one of "temperature", "radiation", or "wind".    
+degf - the degrees of freedom.     
+
+Output: the model.
+```{r}
+ss.partial<-function(column, degf){
+    # Extract the data for the feature we are interested in 
+    feature<-ozone.data[[column]]
+    
+    # Construct a model using smoothing splines where the smoothing parameter 
+    # lambda is determined from the degrees of freedom
+    fit_smooth = with(ozone.data, smooth.spline(feature, ozone, df = degf))
+    # Construct a model with optimal \lambda determined from CV
+    fit_smooth_cv = with(ozone.data, smooth.spline(feature, ozone, cv = TRUE))
+    
+    # Extract the effective degrees of freedom
+    edf<-round(fit_smooth_cv$df,2)
+  
+    # Build the labels 
+    Key<-paste(degf," degrees of freedom")
+    label2<-paste(edf, "effective degrees of freedom")
+
+    # Plot the smoothing splines
+    p<- ggplot() +
+        geom_point(data = ozone.data, aes(x = feature, y = ozone)) +
+        geom_line(aes(x = fit_smooth$x, y = fit_smooth$y, 
+                                                color = Key))  +
+        geom_line(aes(x = fit_smooth_cv$x, y = fit_smooth_cv$y, 
+                                                  color = label2)) +
+        theme(legend.position = 'right') + 
+        labs(title = "Smoothing Splines on Ozone Data", x=column, y="ozone") 
+  # Print the plot
+  print(p)
+  # Return the model with \lambda determined via CV
+  return(fit_smooth_cv)
+}
+```
+  
+
+# Regression Splines
+Recall that for fixed $M$, a basis for the space of regression splines in one dimension is given by 
+\begin{align*} h_j(x) & =  x^{j-1}, \qquad j=1,\dots,M \\
+h_{M+1} & = (x-\xi_\ell)_+^{M-1}, \qquad \ell = 1, \dots, K,
+\end{align*}
+where $\xi_i$ with $i \in [1, \dots, K]$ are the fixed knots. This basis has $K+M$ terms; meaning in a spline space of order $M$ with $K$ knots, we have $M+K$ degrees of freedom to specify our approximation functions. With this basis, we then perform ordinary linear regression to determine $\hat \beta = \hat\beta_0, \dots, \hat \beta_{M+K}$ to form the model 
+$$ \hat f(x) = \sum_{k=1}^{M+K} \beta_k h_k(x).$$
+
+
+In $R$, regular regression splines of order $M$ with fixed knots are formed via the function bs() with the default being $M = 4$. The knots can be specified; if they are not, the knots are chosen by default at the $K$ quantiles of the data. Furthermore, if there are $N$ training points $x_i$, this function bs() returns a $N \times (M+K-1)$ basis matrix of the form 
+\begin{align*} X  & = \begin{pmatrix} h_2(x_1) &\dots & h_M(x_1) & h_{M+1}(x_1) & \dots & h_{M+K}(x_1) \\  \vdots & &\vdots & \vdots & & \vdots \\  h_2(x_N) &\dots & h_M(x_N) & h_{M+1}(x_N) & \dots & h_{M+K}(x_N)\end{pmatrix}\\
+& = \begin{pmatrix} x_1 & \dots & x_1^{M-1} & (x_1 - \xi_1)_+^{M-1}& \dots& (x_1 - \xi_K)_+^{M-1} \\ \vdots & & \vdots & \vdots & & \vdots  \\x_N & \dots & x_N^{M-1} & (x_N - \xi_1)_+^{M-1}& \dots& (x_N - \xi_K)_+^{M-1} \end{pmatrix}.
+\end{align*}
+
+
+It is important to notice that this basis matrix excludes the constant basis element. Therefore, the function bs() has $M+K-1$ degrees of freedom. After we form the basis matrix, we perform ordinary linear regression using the lm() function. It is important to note that the call of this function automatically includes the constant basis element to form the intercept.  
+
+## Regression on 1 Feature 
+
+In this section, we work with cubic splines. Therefore if we specify $6$ degrees of freedom, this means that $3$ interior knots will be chosen; they are fixed at the median and the first and third quartile of the training data. 
+
+Here we produce the figures similar to those in Figure 5.4 in the text. These display fitted B-spline functions and included are the point-wise standard error bounds. 
+```{r, fig.show="hold", out.width="50%"}
+bs.temp<-b.or.n.partial("temperature", degf,"bs")
+bs.rad<-b.or.n.partial("radiation", degf,"bs")
+```
+
+```{r, fig.show="hold", out.width="50%"}
+bs.wind<-b.or.n.partial("wind", degf,"bs")
+```
+
+These plots are made as follows: 
+\begin{enumerate}
+\item First, a basis of cubic splines with three interior knots at the quartiles of the feature data is generated;
+\item we perform linear regression on this basis;
+\item this model is used to predict ozone data from the feature;
+\item the standard error of these predictions is computed and forms the error bars.
+\end{enumerate}
+
+```{r}
+t<-toString(attr(bs(ozone.data[["temperature"]],df=degf),"knots"))
+r<- toString(attr(bs(ozone.data[["radiation"]],df=degf),"knots"))
+w<- toString(attr(bs(ozone.data[["wind"]],df=degf),"knots"))
+
+sep="\n"
+string<- paste("The x values of the knots are fixed at the values: ", sep, "Temperature: ", t, sep,"Radiation: ", r, sep, "Wind: ", w )
+cat(string)  
+
+```
+
+```{r}
+t<- round(sum(abs(bs.temp$residual)^2), 2)
+r<- round(sum(abs(bs.rad$residual)^2), 2)
+w<- round(sum(abs(bs.wind$residual)^2), 2)
+
+sep="\n"
+string<- paste("The residual sum squares for each feature are as follow: ", sep, "Temperature: ", t, sep,"Radiation: ", r, sep, "Wind: ", w )
+cat(string)
+```
+
+## Multiple Regression
+Now we want to predict the ozone levels using all of the features. In this case, we need to construct a large linear regression model using bases for cubic splines associated to each feature. This can be done using the lm() function as well. Now each of the features form a coordinate of our model. 
+```{r}
+bsmodel<- lm(ozone ~  bs(radiation, degf)+bs(temperature, degf)+bs(wind, degf), data=ozone.data)
+```
+
+The model summary is as follows: 
+```{r}
+tidy(summary(bsmodel))
+```
+
+The residual plots for the full model using regression splines are as follow: 
+```{r}
+par(mfrow = c(2,2))
+plot(bsmodel, col="blue")
+```
+
+We can also use ANOVA testing to determine whether all three features are necessary to make a good prediction. For example, if we wanted to understand the effect that adding the wind data has on our model, we can compare two models; one that just uses the radiation and temperature data and another that uses all three features.
+
+```{r}
+submodel1<-lm(ozone~bs(radiation, degf) + bs(temperature, degf), data=ozone.data)
+submodel2<-lm(ozone~bs(radiation, degf) + bs(wind, degf), data=ozone.data)
+submodel3<-lm(ozone~bs(wind, degf) + bs(temperature, degf), data=ozone.data)
+
+tidy(anova(bsmodel, submodel1))
+tidy(anova(bsmodel, submodel2))
+tidy(anova(bsmodel, submodel3))
+```
+Because the $p$-value is the largest when adding in radiation, this suggests that radiation is in some sense the least useful feature in determining ozone levels. 
+
+# Natural Spline Regression
+Recall that natural splines are just like regression splines, only now they are required to be linear at the end intervals $[a,\xi_1]$ and $[\xi_K, b]$. A basis for the set of all natural cubic splines on $K$ knots in one dimension is given by 
+\begin{align*} N_1(x)  & = 1, \qquad N_2(x) = x \\
+N_{k+2}(x) & = d_k(x) - d_{K-1}(x), \qquad k = 1, \dots, K-2 \\
+ \text{ where } d_k(x)&  = \frac{(x-\xi_k)^3_+ - (x-\xi_K)_+^3}{\xi_K-\xi_k}.
+\end{align*}
+While the functions $d_k(x)$ are not linear, $d_k(x) - d_{K-1}(x)$ are all linear. We then perform linear regression to determine the parameter $\hat \theta = (\hat \theta_1, \dots, \hat \theta_K)$ to construct the model 
+$$ \hat f(x) = \sum_{i=1}^K \theta_i N_i(x).$$
+
+In $R$, the function ns() constructs a matrix of these basis functions evaluated at the training data $x_N$. More specifically, this matrix is of the form 
+$$X = \begin{pmatrix} N_2(x_1) & N_3(x_1) & \dots  &N_{K}(x_1) \\
+N_2(x_2) & N_3(x_2) & \dots & N_{K}(x_2) \\  \vdots & \vdots & & \vdots \\N_2(x_N) & N_3(x_N) & \dots & N_{K}(x_N)\end{pmatrix}, $$
+where as in the case of regression splines, the constant basis function $N_1(x)$ is excluded. The exclusion of the constant term is then accounted for in the function lm(), which performs ordinary regression on this data matrix. 
+
+In general, natural cubic splines have $M+K+4$ degrees of freedom. This is because the requirement that the function is linear beyond the two boundary knots frees up four degrees of freedom, which can be used as interior knots. Therefore, if we fix the degrees of freedom, the model using natural cubic splines will have more interior knots than the model using regression splines.
+
+## Regression on 1 Feature
+In this section, we use cubic splines $M=4$ and we want the same number of degrees of freedom as in the case of regression splines. Note that since the constant basis element is excluded from these calculations using the function ns(), we will only have two more interior knots than we did with regression splines. 
+
+First, we perform linear regression with natural cubic splines on each feature individually. 
+```{r, fig.show="hold", out.width="50%"}
+ns.temp<-b.or.n.partial("temperature", degf,"ns")
+ns.rad<-b.or.n.partial("radiation", degf,"ns")
+```
+
+```{r, fig.show="hold", out.width="50%"}
+ns.wind<-b.or.n.partial("wind", degf,"ns")
+```
+
+```{r}
+t<-toString(attr(ns(ozone.data[["temperature"]],df=degf),"knots"))
+r<- toString(attr(ns(ozone.data[["radiation"]],df=degf),"knots"))
+w<- toString(attr(ns(ozone.data[["wind"]],df=degf),"knots"))
+
+sep="\n"
+string<- paste("The x values of the knots for these models are at the following values: ", sep, "Temperature: ", t, sep,"Radiation: ", r, sep, "Wind: ", w )
+cat(string)  
+```
+
+
+```{r}
+t<- round(sum(abs(ns.temp$residual)^2), 2)
+r<- round(sum(abs(ns.rad$residual)^2), 2)
+w<- round(sum(abs(ns.wind$residual)^2), 2)
+
+sep="\n"
+string<- paste("The residual sum squares for each feature are as follow: ", sep,"Temperature: ", t, sep,"Radiation: ", r, sep, "Wind: ", w )
+cat(string)
+```
+
+The process for making these plots is virtually identical to the one used in the regression spline case, only now we use ns() instead of bs().
+
+## Multiple Regression with Natural Splines
+
+Now we want to predict the ozone levels using all of the features. Here, we are just creating a large linear regression model with an appropriate choice of bases where each feature forms a coordinate of the model.
+```{r}
+nsmodel<- lm(ozone ~ ns(radiation, degf)+ns(temperature, degf)+ns(wind, degf), data=ozone.data)
+```
+Here is the model summary: 
+```{r}
+tidy(summary(nsmodel))
+```
+
+
+
+We can also look at the residual plots:
+```{r}
+par(mfrow = c(2,2))
+plot(nsmodel, col="blue")
+```
+
+
+# Smoothing Spline Regression
+Recall that smoothing splines incorporate the smoothing parameter $\lambda$ and minimize the penalized residual sum squares 
+$$ RSS(f,\lambda) = \sum_{i=1}^N \big(y_i - f(x_i) \big)^2 + \lambda \int \left(f''(t) \right)^2 \ dt.$$
+We have previously argued that the minimizer is a natural spline, so we know that $f$ has the form 
+$$ f(x) = \sum_{j=1}^N N_j(x)\theta_j $$
+where $\{N_j\}$ forms a basis for the space of natural splines of order $M$. If we define the matrix $\mathbf N$ to have $ij$th entry given by $N_j(x_i)$ and the matrix $\mathbf \Omega_N$ to have $jk$th entry $\int N_j'' N_k''$, then we can formulate the residual sum squares as 
+$$ RSS(\theta, \lambda) = (\mathbf y - \mathbf N\theta)^T (\mathbf y - \mathbf N\theta) + \lambda\theta^T\mathbf\Omega_N\theta $$
+where the minimizing solution is given by 
+$$ \hat \theta = \big( \mathbf N^T\mathbf N + \lambda \mathbf \Omega_N \big)^{-1} \mathbf N^T\mathbf y.$$
+If $\hat{\mathbf f}$ is the $N$ vector of fitted values $\hat f(x_i)$, then we can write 
+\begin{align*} \hat {\mathbf f} & = \mathbf N \big( \mathbf N^T\mathbf N + \lambda \mathbf \Omega_N \big)^{-1} \mathbf N^T\mathbf y\\
+& := S_\lambda y.
+\end{align*}
+Recalling that the degrees of freedom for a linear regression model $\hat f(x) = Hy$ can be computed as $\text{Tr}(H)$, we define the effective degrees of freedom of a smoothing spline to be 
+$$ df_\lambda = \text{Tr} \big(S_\lambda\big).$$
+Note that in the case of linear models, $df = $\text{Tr}(H)$ will result in the same number of degrees of freedom as obtained in the discussion for regression splines and natural splines. 
+
+This is however a nonlinear problem so our linear regression techniques do not apply.
+
+Smooth splines can be made in $R$ using smooth.spline(). The default degree of the splines is cubic and the smoothing parameter $\lambda$ is specified from the degrees of freedom. If the degree of freedom is not specified, or alternatively we set "cv = TRUE", then $\lambda$ is determined by leave-one-out cross validation (LOOCV).
+
+## Regression on 1 Feature
+In this section, we perform regression on one feature at a time to predict the ozone levels. We plot the predictor function where $\lambda$ is determined from the specified degree of freedom and the predictor function where $\lambda$ is determined via cross-validation. Note that since there are multiple ozone measurements for a particular feature value, the function tells us to be cautious with trusting the $\lambda$ computed from cross validation. 
+
+
+```{r, figures-side, fig.show="hold", out.width="50%"}
+ss.temp<-ss.partial("temperature", degf)
+ss.rad<-ss.partial("radiation", degf)
+```
+```{r, ss.wind, fig.show="hold", out.width="50%"}
+ss.wind<-ss.partial("wind", degf)
+```
+
+```{r}
+t<- round(ss.temp$lambda, 5)
+r<- round(ss.rad$lambda, 5)
+w<-  round(ss.wind$lambda, 5)
+
+sep="\n"
+string<- paste("The optimal smoothing parameters lambda as determined by LOOCV for each feature are as follow: ", sep, "Temperature: ", t, sep,"Radiation: ", r, sep, "Wind: ", w )
+cat(string)
+```
+
+```{r}
+t<- round(ss.temp$pen.crit, 2)
+r<- round(ss.rad$pen.crit, 2)
+w<- round(ss.wind$pen.crit, 2)
+
+sep="\n"
+string<- paste("The residual sum squares for each feature are as follow: ", sep, "Temperature: ", t, sep,"Radiation: ", r, sep, "Wind: ", w )
+cat(string)
+```
+
+## Multiple Regression with Smoothing Splines
+A regression model for the ozone using smoothing splines and all three parameters can be constructed using the function gam(). This function creates a generalized additive model using the ozone data. Previously, we used lm() because the components could be expressed in terms of basis functions and then the parameters could be fit using ordinary least squares regression. Since this is not the case for smoothing splines, we must use a more general sort of additive model.
+
+```{r}
+ssmodel = gam(ozone ~ s(radiation) + s(temperature) + s(wind), data = ozone.data)
+```
+
+The predictions for each component and the model summary are as follow: 
+```{r}
+par(mfrow = c(1,3))
+plot(ssmodel, se = TRUE, col = "blue")
+```
+
+We can also look at the residual plots for this model: 
+```{r}
+par(mfrow = c(2,2))
+gam.check(ssmodel)
+```
+# Comparison 
+
+In this section, we compare the residual sum squares between the ozone predictions by each spline model using all three features and the actual ozone data. This is given by 
+$$ RSS(\hat f) = \sum_{i=1}^N (\hat f(x_i) - y_i)^2.$$
+
+```{r}
+reg.rss<-round(sum(abs(bsmodel$residuals)^2),2)
+nat.rss<-round(sum(abs(nsmodel$residuals)^2),2)
+ss.rss<-round(sum(abs(ssmodel$residuals)^2),2)
+
+sep="\n"
+string<- paste("The residual sum squares for each full model are as follow: ", sep, "Regression Splines: ", reg.rss, sep,"Natural Splines: ", nat.rss, sep, "Smoothing Splines: ", ss.rss )
+cat(string)
+
+```
+It makes sense that the model using natural splines has a lower RSS than the model using regression splines since there are more interior knots in the former model. Furthermore, since the model using smoothing splines encourages a smoother $\hat f$, it makes sense that this characteristic comes at the expense of increasing the RSS beyond that of the model using natural cubic splines. 
+
+In all of these models, the residuals get larger as the predictions increase. This suggests that our model could be improved; perhaps there is a variable missing or we could transform a variable to get a better fit. 
